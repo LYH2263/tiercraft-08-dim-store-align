@@ -3,6 +3,14 @@ from __future__ import annotations
 import json
 
 from app.db import connect, rows_to_dicts
+from app.seed import (
+    NAME_SOURCE_AS_IS,
+    NAME_SOURCE_BACKFILL,
+    NAME_SOURCE_CONFLICT,
+    REASON_DISABLED,
+    REASON_NEGATIVE,
+    REASON_UNKNOWN,
+)
 
 
 STEP_LABEL = {
@@ -91,44 +99,152 @@ def run_paste_to_detail(domain_id: int) -> dict:
         raise ValueError("主题域不存在")
     conn = connect()
     try:
+        # 先登记任务头，明细与拒收都挂到该任务上，报告数字再由三张表同源派生
+        cur = conn.execute(
+            """
+            INSERT INTO layer_jobs(domain_id, step, status, message)
+            VALUES (?, 'paste_to_detail', '成功', '')
+            """,
+            (domain_id,),
+        )
+        job_id = int(cur.lastrowid)
+
+        # 本任务全量重刷本域明细；拒收清单按任务留存，不随重刷清除
         conn.execute("DELETE FROM layer_detail WHERE domain_id=?", (domain_id,))
+
+        # 启用维集合：编码精确命中才放行，停用/删除/未知编码一律拒收，不做店名模糊匹配
+        dim_rows = conn.execute("SELECT store_code, store_name, enabled FROM dim_store").fetchall()
+        enabled_dim: dict[str, str] = {
+            r["store_code"]: r["store_name"] for r in dim_rows if r["enabled"] == 1
+        }
+        disabled_codes = {r["store_code"] for r in dim_rows if r["enabled"] != 1}
+
         paste = conn.execute(
             "SELECT * FROM layer_paste WHERE domain_id=? ORDER BY id", (domain_id,)
         ).fetchall()
-        out = drop = 0
         for row in paste:
-            store_name = (row["store_name"] or "").strip()
+            store_code = (row["store_code"] or "").strip()
+            paste_name = (row["store_name"] or "").strip()
             amount = float(row["amount"])
-            if not store_name or amount < 0:
-                drop += 1
+
+            reasons: list[str] = []
+            if store_code not in enabled_dim:
+                reasons.append(REASON_DISABLED if store_code in disabled_codes else REASON_UNKNOWN)
+            if amount < 0:
+                reasons.append(REASON_NEGATIVE)
+            if reasons:
+                # 未命中启用维：只进拒收清单，绝不写明细占位行
+                conn.execute(
+                    """
+                    INSERT INTO clean_rejections(
+                      job_id, domain_id, paste_id, biz_day, store_code, store_name_paste,
+                      category, amount, reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        domain_id,
+                        row["id"],
+                        row["biz_day"],
+                        store_code,
+                        paste_name,
+                        row["category"],
+                        amount,
+                        "；".join(reasons),
+                    ),
+                )
                 continue
+
+            # 命中启用维：店名一律以维表为准，杜绝同编码多店名
+            dim_name = enabled_dim[store_code]
+            if not paste_name:
+                name_source = NAME_SOURCE_BACKFILL
+            elif paste_name != dim_name:
+                name_source = NAME_SOURCE_CONFLICT
+            else:
+                name_source = NAME_SOURCE_AS_IS
             conn.execute(
                 """
                 INSERT INTO layer_detail(
-                  domain_id, biz_day, store_code, store_name, category, amount, qty, clean_flag
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  domain_id, job_id, biz_day, store_code, store_name, category,
+                  amount, qty, clean_flag, name_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '已清洗', ?)
                 """,
                 (
                     domain_id,
+                    job_id,
                     row["biz_day"],
-                    row["store_code"],
-                    store_name,
+                    store_code,
+                    dim_name,
                     row["category"],
                     amount,
                     int(row["qty"]),
-                    "已清洗",
+                    name_source,
                 ),
             )
-            out += 1
-        cur = conn.execute(
+
+        # 报告计数与维表启用集合、拒收清单、明细层同源派生，
+        # 不另起独立计数器：全部对本次任务落库结果做 SQL 聚合
+        in_count = int(
+            conn.execute(
+                "SELECT COUNT(*) AS c FROM layer_paste WHERE domain_id=?", (domain_id,)
+            ).fetchone()["c"]
+        )
+        out_count = int(
+            conn.execute(
+                "SELECT COUNT(*) AS c FROM layer_detail WHERE domain_id=? AND job_id=?",
+                (domain_id, job_id),
+            ).fetchone()["c"]
+        )
+        reject_count = int(
+            conn.execute(
+                "SELECT COUNT(*) AS c FROM clean_rejections WHERE domain_id=? AND job_id=?",
+                (domain_id, job_id),
+            ).fetchone()["c"]
+        )
+        backfill_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM layer_detail
+                 WHERE domain_id=? AND job_id=? AND name_source=?
+                """,
+                (domain_id, job_id, NAME_SOURCE_BACKFILL),
+            ).fetchone()["c"]
+        )
+        conflict_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM layer_detail
+                 WHERE domain_id=? AND job_id=? AND name_source=?
+                """,
+                (domain_id, job_id, NAME_SOURCE_CONFLICT),
+            ).fetchone()["c"]
+        )
+        if in_count != out_count + reject_count:
+            # 同源派生的硬校验：输入必须等于写入加拒收，防止口径漂移
+            raise RuntimeError("清洗计数校验失败：输入数与写入+拒收不一致")
+
+        conn.execute(
             """
-            INSERT INTO layer_jobs(domain_id, step, status, message, in_count, out_count, drop_count)
-            VALUES (?, 'paste_to_detail', '成功', ?, ?, ?, ?)
+            UPDATE layer_jobs
+               SET in_count=?, out_count=?, drop_count=?, backfill_count=?,
+                   conflict_count=?, message=?
+             WHERE id=?
             """,
-            (domain_id, f"清洗完成，剔除门店名为空或金额为负的行", len(paste), out, drop),
+            (
+                in_count,
+                out_count,
+                reject_count,
+                backfill_count,
+                conflict_count,
+                (
+                    f"清洗完成：输入{in_count}行，写入明细{out_count}行，拒收{reject_count}行"
+                    f"（维表未命中或金额为负），空名回填{backfill_count}行，异名冲突覆盖{conflict_count}行"
+                ),
+                job_id,
+            ),
         )
         conn.commit()
-        job_id = int(cur.lastrowid)
         return dict(conn.execute("SELECT * FROM layer_jobs WHERE id=?", (job_id,)).fetchone())
     finally:
         conn.close()
@@ -276,8 +392,11 @@ def dashboard() -> dict:
                 "编号": j["id"],
                 "步骤": STEP_LABEL.get(j["step"], j["step"]),
                 "状态": j["status"],
+                "输入": j["in_count"],
                 "写入": j["out_count"],
-                "剔除": j["drop_count"],
+                "拒收": j["drop_count"],
+                "空名回填": j["backfill_count"],
+                "冲突覆盖": j["conflict_count"],
             }
             for j in jobs
         ],

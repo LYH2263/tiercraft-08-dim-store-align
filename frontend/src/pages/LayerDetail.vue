@@ -16,14 +16,17 @@ onMounted(async () => {
 <template>
   <div>
     <h2>明细层</h2>
-    <p class="lead">清洗标准化后的明细；门店名为空或金额为负的贴源行不会进入本层。</p>
+    <p class="lead">
+      仅保留命中启用门店维的清洗结果；门店名称为入库时按维表确定的快照，
+      维表之后改名或停用不会回写本层，读明细也不临时关联维表。
+    </p>
     <p v-if="err" class="err">{{ err }}</p>
     <div class="panel">
       <table>
         <thead>
           <tr>
             <th>编号</th><th>主题域</th><th>业务日</th><th>门店编码</th><th>门店名称</th>
-            <th>品类</th><th>金额</th><th>件数</th><th>清洗标记</th>
+            <th>品类</th><th>金额</th><th>件数</th><th>清洗标记</th><th>名称来源</th>
           </tr>
         </thead>
         <tbody>
@@ -37,6 +40,7 @@ onMounted(async () => {
             <td>{{ r.amount }}</td>
             <td>{{ r.qty }}</td>
             <td>{{ r.clean_flag }}</td>
+            <td>{{ r.name_source }}</td>
           </tr>
         </tbody>
       </table>

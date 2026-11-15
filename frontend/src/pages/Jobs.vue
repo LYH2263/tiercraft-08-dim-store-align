@@ -41,7 +41,10 @@ async function run(step) {
 <template>
   <div>
     <h2>分层任务</h2>
-    <p class="lead">按主题域推进：先贴源到明细，再明细到汇总。</p>
+    <p class="lead">
+      按主题域推进：先贴源到明细，再明细到汇总。贴源到明细按门店维校验编码，
+      未命中启用维或金额为负的行进拒收清单；店名以维表为准回填或覆盖。
+    </p>
     <div class="toolbar">
       <label>
         主题域
@@ -51,12 +54,16 @@ async function run(step) {
       </label>
       <button :disabled="busy" @click="run('明细')">跑贴源到明细</button>
       <button class="secondary" :disabled="busy" @click="run('汇总')">跑明细到汇总</button>
+      <router-link class="btn secondary" to="/stores">查看门店维与拒收清单</router-link>
     </div>
     <p v-if="err" class="err">{{ err }}</p>
     <div class="panel">
       <table>
         <thead>
-          <tr><th>编号</th><th>步骤</th><th>状态</th><th>说明</th><th>输入</th><th>写入</th><th>剔除</th><th>时间</th></tr>
+          <tr>
+            <th>编号</th><th>步骤</th><th>状态</th><th>说明</th>
+            <th>输入</th><th>写入</th><th>拒收</th><th>空名回填</th><th>冲突覆盖</th><th>时间</th>
+          </tr>
         </thead>
         <tbody>
           <tr v-for="j in jobs" :key="j.id">
@@ -66,7 +73,9 @@ async function run(step) {
             <td>{{ j.message }}</td>
             <td>{{ j.in_count }}</td>
             <td>{{ j.out_count }}</td>
-            <td>{{ j.drop_count }}</td>
+            <td :class="j.drop_count ? 'warn' : ''">{{ j.drop_count }}</td>
+            <td>{{ j.backfill_count }}</td>
+            <td :class="j.conflict_count ? 'warn' : ''">{{ j.conflict_count }}</td>
             <td>{{ j.created_at }}</td>
           </tr>
         </tbody>

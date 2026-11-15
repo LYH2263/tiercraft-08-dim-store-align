@@ -53,10 +53,14 @@ const meter = computed(() => {
       <div class="panel">
         <h3>最近分层任务</h3>
         <table v-if="data.最近任务.length">
-          <thead><tr><th>编号</th><th>步骤</th><th>状态</th><th>写入</th><th>剔除</th></tr></thead>
+          <thead><tr><th>编号</th><th>步骤</th><th>状态</th><th>输入</th><th>写入</th><th>拒收</th><th>空名回填</th><th>冲突覆盖</th></tr></thead>
           <tbody>
             <tr v-for="j in data.最近任务" :key="j.编号">
-              <td>{{ j.编号 }}</td><td>{{ j.步骤 }}</td><td>{{ j.状态 }}</td><td>{{ j.写入 }}</td><td>{{ j.剔除 }}</td>
+              <td>{{ j.编号 }}</td><td>{{ j.步骤 }}</td><td>{{ j.状态 }}</td>
+              <td>{{ j.输入 }}</td><td>{{ j.写入 }}</td>
+              <td :class="j.拒收 ? 'warn' : ''">{{ j.拒收 }}</td>
+              <td>{{ j.空名回填 }}</td>
+              <td :class="j.冲突覆盖 ? 'warn' : ''">{{ j.冲突覆盖 }}</td>
             </tr>
           </tbody>
         </table>
